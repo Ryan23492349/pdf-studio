@@ -386,6 +386,7 @@ function InlineEditableTextAnnotation({
       const range = document.createRange();
       range.setStart(element, element.childNodes.length);
       range.collapse(false);
+
       selection?.removeAllRanges();
       selection?.addRange(range);
     };
@@ -569,6 +570,7 @@ export default function Home() {
     };
 
     window.addEventListener("keydown", handleUndoDelete);
+
     return () => window.removeEventListener("keydown", handleUndoDelete);
   }, [inlineTextAnnotationId, lastDeletedTextAnnotation, previewedPageId]);
 
@@ -836,20 +838,26 @@ export default function Home() {
   };
 
   const loadPdf = useCallback(
-    async (selectedFile: File, mode: "replace" | "append" = "replace") => {
+    async (
+      selectedFile: File,
+      mode: "replace" | "append" = "replace",
+      options: { silent?: boolean; batch?: boolean } = {}
+    ): Promise<number> => {
       const isPdf =
         selectedFile.type === "application/pdf" ||
         selectedFile.name.toLowerCase().endsWith(".pdf");
 
       if (!isPdf) {
-        toast.error("請選擇 PDF 檔案。", {
-          description: "此工作台目前只支援 .pdf 格式。",
-        });
-        return;
+        if (!options.silent) {
+          toast.error("請選擇 PDF 檔案。", {
+            description: "此工作台目前只支援 .pdf 格式。",
+          });
+        }
+
+        return 0;
       }
 
-      setIsLoading(true);
-
+      if (!options.batch) setIsLoading(true);
       if (mode === "replace") setPages([]);
 
       try {
@@ -862,7 +870,6 @@ export default function Home() {
         for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
           const page = await pdf.getPage(pageNumber);
           const viewport = page.getViewport({ scale: 0.48 });
-
           const canvas = document.createElement("canvas");
           const context = canvas.getContext("2d", { alpha: false });
 
@@ -907,32 +914,130 @@ export default function Home() {
 
         setViewMode("grid");
 
-        toast.success(
-          mode === "append" ? "PDF 已加入工作區。" : "PDF 已載入工作台。",
-          {
-            description:
-              mode === "append"
-                ? `已追加 ${previews.length} 張頁面，並清除原有切點。`
-                : `已建立 ${previews.length} 張頁面縮圖。`,
-          }
-        );
+        if (!options.silent) {
+          toast.success(
+            mode === "append" ? "PDF 已加入工作區。" : "PDF 已載入工作台。",
+            {
+              description:
+                mode === "append"
+                  ? `已追加 ${previews.length} 張頁面，並清除原有切點。`
+                  : `已建立 ${previews.length} 張頁面縮圖。`,
+            }
+          );
+        }
+
+        return previews.length;
       } catch (error) {
         console.error(error);
-        toast.error("無法讀取這份 PDF。", {
-          description: "請確認檔案沒有損毀或受到密碼保護。",
-        });
+
+        if (!options.silent) {
+          toast.error("無法讀取這份 PDF。", {
+            description: "請確認檔案沒有損毀或受到密碼保護。",
+          });
+        }
 
         if (mode === "replace") clearFile();
+
+        return 0;
       } finally {
-        setIsLoading(false);
+        if (!options.batch) setIsLoading(false);
       }
     },
     []
   );
 
+  const loadPdfFiles = useCallback(
+    async (
+      selectedFiles: File[],
+      mode: "replace" | "append" = "replace"
+    ) => {
+      const validFiles = selectedFiles.filter(
+        (selectedFile) =>
+          selectedFile.type === "application/pdf" ||
+          selectedFile.name.toLowerCase().endsWith(".pdf")
+      );
+
+      const skippedCount = selectedFiles.length - validFiles.length;
+
+      if (validFiles.length === 0) {
+        toast.error("請選擇 PDF 檔案。", {
+          description: "此工作台目前只支援 .pdf 格式。",
+        });
+        return;
+      }
+
+      if (skippedCount > 0) {
+        toast.message("已略過非 PDF 檔案。", {
+          description: "只有 .pdf 檔案會被載入工作區。",
+        });
+      }
+
+      if (validFiles.length === 1) {
+        const firstFile = validFiles[0];
+        if (firstFile) await loadPdf(firstFile, mode);
+        return;
+      }
+
+      setIsLoading(true);
+
+      let loadedFileCount = 0;
+      let loadedPageCount = 0;
+      let hasLoadedFile = false;
+
+      for (const selectedFile of validFiles) {
+        const currentMode =
+          mode === "append" ? "append" : hasLoadedFile ? "append" : "replace";
+
+        const addedPageCount = await loadPdf(selectedFile, currentMode, {
+          silent: true,
+          batch: true,
+        });
+
+        if (addedPageCount > 0) {
+          loadedFileCount += 1;
+          loadedPageCount += addedPageCount;
+          hasLoadedFile = true;
+        }
+      }
+
+      setIsLoading(false);
+
+      if (loadedFileCount === 0) {
+        toast.error("無法載入選擇的 PDF。", {
+          description: "請確認檔案沒有損毀或受到密碼保護。",
+        });
+        return;
+      }
+
+      if (loadedFileCount < validFiles.length) {
+        toast.error("部分 PDF 無法載入。", {
+          description: "已成功載入可處理的 PDF，其餘檔案請重新確認。",
+        });
+      }
+
+      const successTitle =
+        loadedFileCount > 1
+          ? mode === "append"
+            ? "多份 PDF 已加入工作區。"
+            : "多份 PDF 已載入工作台。"
+          : mode === "append"
+            ? "PDF 已加入工作區。"
+            : "PDF 已載入工作台。";
+
+      toast.success(successTitle, {
+        description: `已處理 ${loadedFileCount} 份 PDF，共新增 ${loadedPageCount} 張頁面。`,
+      });
+    },
+    [loadPdf]
+  );
+
   const onInputChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = event.target.files?.[0];
-    if (selectedFile) void loadPdf(selectedFile);
+    const selectedFiles = Array.from(event.target.files ?? []);
+    event.target.value = "";
+
+    if (selectedFiles.length > 0) {
+      void loadPdfFiles(selectedFiles, "replace");
+    }
   };
 
   const onImportInputChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -940,11 +1045,7 @@ export default function Home() {
     event.target.value = "";
 
     if (selectedFiles.length > 0) {
-      void (async () => {
-        for (const selectedFile of selectedFiles) {
-          await loadPdf(selectedFile, "append");
-        }
-      })();
+      void loadPdfFiles(selectedFiles, "append");
     }
   };
 
@@ -952,8 +1053,11 @@ export default function Home() {
     event.preventDefault();
     setIsDragging(false);
 
-    const selectedFile = event.dataTransfer.files?.[0];
-    if (selectedFile) void loadPdf(selectedFile);
+    const selectedFiles = Array.from(event.dataTransfer.files ?? []);
+
+    if (selectedFiles.length > 0) {
+      void loadPdfFiles(selectedFiles, "replace");
+    }
   };
 
   const splitPdf = async () => {
@@ -1283,7 +1387,6 @@ export default function Home() {
     const [movedPage] = nextPages.splice(sourceIndex, 1);
 
     let insertionIndex = targetIndex + (position === "after" ? 1 : 0);
-
     if (sourceIndex < insertionIndex) insertionIndex -= 1;
 
     nextPages.splice(insertionIndex, 0, movedPage);
@@ -1392,6 +1495,7 @@ export default function Home() {
               disabled={isSplitting || splitPoints.length === 0}
               onClick={() => void splitPdf()}
             />
+
             <ToolButton
               label="清除切點"
               tooltip="清除所有已選分割點"
@@ -1399,9 +1503,10 @@ export default function Home() {
               disabled={splitPoints.length === 0 || isSplitting}
               onClick={clearSplitPoints}
             />
+
             <ToolButton
               label={isLoading ? "正在匯入" : "匯入"}
-              tooltip="加入另一份 PDF 並追加其頁面"
+              tooltip="加入一或多份 PDF 並追加其頁面"
               icon={
                 isLoading ? (
                   <Loader2 className="animate-spin" size={17} />
@@ -1412,6 +1517,7 @@ export default function Home() {
               disabled={isLoading || isSplitting || isExporting}
               onClick={() => importInputRef.current?.click()}
             />
+
             <ToolButton
               label={isExporting ? "正在匯出" : "匯出"}
               tooltip="匯出目前頁序與編輯結果"
@@ -1436,6 +1542,7 @@ export default function Home() {
                   className="icon-button"
                   type="button"
                   aria-label="關閉目前文件並返回上載畫面"
+                  disabled={isLoading || isSplitting || isExporting}
                   onClick={clearFile}
                 >
                   <X size={18} />
@@ -1457,9 +1564,11 @@ export default function Home() {
         ref={inputRef}
         type="file"
         accept="application/pdf,.pdf"
+        multiple
         onChange={onInputChange}
         className="sr-only"
       />
+
       <input
         ref={importInputRef}
         type="file"
@@ -1475,20 +1584,23 @@ export default function Home() {
             <div className="eyebrow">
               <Sparkles size={15} /> 文件流程 / 01 READY
             </div>
+
             <h1>
               下一步：
               <br />
               <em>匯入 PDF。</em>
             </h1>
+
             <p>
               匯入後，所有頁面會配置到文件軌道；依序排列頁面、選取頁間切縫，最後輸出單一
               PDF 或分拆 ZIP。
             </p>
+
             <div className="upload-points">
               <span>
                 <b>01</b>
                 <Check size={15} />
-                <strong>匯入 PDF</strong>
+                <strong>匯入一個或多份 PDF</strong>
                 <small>載入頁面至工作軌道</small>
               </span>
               <span>
@@ -1546,22 +1658,26 @@ export default function Home() {
                 <span>01</span>
                 <i />
               </div>
+
               <div className="upload-cut-seam">
                 <span>
                   <Scissors size={13} />
                 </span>
                 <small>CUT</small>
               </div>
+
               <div className="upload-ghost-page">
                 <span>02</span>
                 <i />
               </div>
+
               <div className="upload-cut-seam upload-cut-seam-active">
                 <span>
                   <Scissors size={13} />
                 </span>
                 <small>SELECT</small>
               </div>
+
               <div className="upload-ghost-page">
                 <span>03</span>
                 <i />
@@ -1572,7 +1688,7 @@ export default function Home() {
               <span className="upload-icon">
                 <UploadCloud size={28} />
               </span>
-              <strong>拖放 PDF 到工作軌道</strong>
+              <strong>拖放一個或多個 PDF 到工作軌道</strong>
               <span>或按一下選取檔案並開始編排</span>
               <span className="dropzone-note">
                 本機處理 · 支援多份 PDF · 無須上傳
@@ -1599,6 +1715,7 @@ export default function Home() {
               <span className="file-icon">
                 <FileText size={21} />
               </span>
+
               <div>
                 <div className="file-name-row">
                   <h1>
@@ -1608,6 +1725,7 @@ export default function Home() {
                   </h1>
                   <span className="file-badge">PDF</span>
                 </div>
+
                 <p>
                   {pageCount === 0
                     ? `尚未加入頁面 · ${formatFileSize(totalSourceSize)}`
@@ -1621,8 +1739,8 @@ export default function Home() {
                         pageCount === 1
                           ? "單頁 PDF 已可直接匯出"
                           : splitPoints.length > 0
-                          ? `已選 ${splitPoints.length} 個切點，將輸出 ${outputFileCount} 份 PDF`
-                          : "點選兩頁之間的剪刀，設定一個或多個切點"
+                            ? `已選 ${splitPoints.length} 個切點，將輸出 ${outputFileCount} 份 PDF`
+                            : "點選兩頁之間的剪刀，設定一個或多個切點"
                       }`}
                 </p>
               </div>
@@ -1809,6 +1927,7 @@ export default function Home() {
                         <span className="order-index">
                           {String(pageNumber).padStart(2, "0")}
                         </span>
+
                         <img
                           className="order-thumbnail"
                           src={page.preview}
@@ -1817,10 +1936,12 @@ export default function Home() {
                             transform: `rotate(${page.rotation}deg)`,
                           }}
                         />
+
                         <div className="order-details">
                           <strong>第 {pageNumber} 頁</strong>
                           <span>原始頁序 #{pageNumber}</span>
                         </div>
+
                         {pageNumber === pageCount && (
                           <span className="order-end">文件結尾</span>
                         )}
@@ -1896,18 +2017,21 @@ export default function Home() {
                       setDraggingTextAnnotation(null);
                     }}
                   />
+
                   <PreviewControlButton
                     label="縮小"
                     icon={<Minus size={17} />}
                     disabled={previewZoom <= PREVIEW_ZOOM_MIN}
                     onClick={() => adjustPreviewZoom(-PREVIEW_ZOOM_STEP)}
                   />
+
                   <span
                     className="preview-zoom-value"
                     aria-label={`目前縮放 ${previewPercent}%`}
                   >
                     {previewPercent}%
                   </span>
+
                   <PreviewControlButton
                     label="放大"
                     icon={<Plus size={17} />}
